@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Keys the generated Info.plist can't express (arrays of dictionaries); Xcode merges
+  this file into it (INFOPLIST_FILE with GENERATE_INFOPLIST_FILE = YES). It lives outside
+  the synchronized Ferry/ folder so it isn't also copied into the app as a resource.
+-->
+<plist version="1.0">
+<dict>
+	<!-- Folders dropped on the Dock icon or opened with Ferry. Rank None: Ferry accepts
+	     folders when asked, but is never chosen as the app that opens them. -->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Folder</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>None</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.folder</string>
+			</array>
+		</dict>
+	</array>
+	<!-- Finder ▸ Services ▸ Open in Ferry, for folders only. The empty NSRequiredContext
+	     makes the system show the service without the user enabling it first. -->
+	<key>NSServices</key>
+	<array>
+		<dict>
+			<key>NSMenuItem</key>
+			<dict>
+				<key>default</key>
+				<string>Open in Ferry</string>
+			</dict>
+			<key>NSMessage</key>
+			<string>openInFerry</string>
+			<key>NSPortName</key>
+			<string>Ferry</string>
+			<key>NSRequiredContext</key>
+			<dict/>
+			<key>NSSendFileTypes</key>
+			<array>
+				<string>public.folder</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

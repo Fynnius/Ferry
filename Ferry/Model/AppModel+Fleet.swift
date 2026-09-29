@@ -82,30 +82,60 @@ extension AppModel {
         discovery.roots = roots.map { ScanRoot(url: $0) }
         scanFound = []
         isScanning = true
+        var found: [DiscoveredRepo] = []
+        var finished = false
         let scanner = RepoScanner(runner: runner)
         for await event in scanner.events(for: discovery.scanRoots) {
             switch event {
             case .progress(let progress):
                 scanProgress = progress
             case .found(let repo):
+                found.append(repo)
                 if case .repository = repo.kind { scanFound.append(repo) }
             case .foundBareRepository:
                 break
             case .finished(let result):
+                finished = true
                 lastScan = result
                 grouping = ProjectGrouper().group(result, overrides: discovery.overrides)
             }
         }
+        if !finished {
+            // Stop and Continue ends the stream before the scan's own result arrives;
+            // review what was found so far.
+            let partial = ScanResult(roots: discovery.scanRoots, repos: found.sorted { $0.path < $1.path }, wasCancelled: true)
+            lastScan = partial
+            grouping = ProjectGrouper().group(partial, overrides: discovery.overrides)
+        }
         isScanning = false
     }
 
-    /// Onboarding done: persist the folders and scan, show the main window.
-    func finishOnboarding() {
+    /// Onboarding done: persist the folders and scan, show the main window. Repos the
+    /// user unchecked are hidden — the same override as a repo's Hide, so Settings →
+    /// Folders can bring them back.
+    func finishOnboarding(hiding unchecked: Set<RepoID> = []) {
+        for id in unchecked {
+            discovery.overrides.setHidden(id, true)
+        }
         saveDiscovery()
         if let lastScan { try? fleetStore.saveLastScan(lastScan) }
         regroup()
         selection = .attention
         phase = .ready
+    }
+
+    /// Onboarding's review: a repo untouched for `RepoItem.dormantAfter` starts unchecked.
+    /// Unknown activity (never committed, not downloaded) counts as recent.
+    static func isDormant(_ entry: RepoEntry, now: Date = .now) -> Bool {
+        guard let last = entry.lastActivity else { return false }
+        return now.timeIntervalSince(last) > RepoItem.dormantAfter
+    }
+
+    /// Chosen repos that reach GitHub over HTTPS — the ones the Connect GitHub step is for.
+    func httpsGitHubRepos(excluding unchecked: Set<RepoID>) -> [RepoEntry] {
+        grouping.visibleRepos.filter { entry in
+            !unchecked.contains(entry.id) && entry.primary.repo.remoteURL.map(CredentialHelper.isHTTPSGitHub) == true
+        }
     }
 
     // MARK: - Grouping → sidebar
@@ -133,6 +163,7 @@ extension AppModel {
             item.name = name
             item.entryID = entry?.id
             item.note = note
+            item.worktreeOf = nil
             item.copies = entry.map { $0.copies.map(\.url) } ?? []
             item.isPinned = entry?.isPinned ?? false
             if !repo.isDownloaded {
@@ -147,7 +178,9 @@ extension AppModel {
             let primary = entry.primary
             var list = [item(primary.repo, name: entry.name, entry: entry, note: entry.duplicateSummary)]
             for worktree in primary.worktrees {
-                list.append(item(worktree, name: worktree.name, entry: nil, note: "Worktree of \(entry.name)"))
+                let child = item(worktree, name: worktree.name, entry: nil, note: "Worktree of \(entry.name)")
+                child.worktreeOf = list[0].id
+                list.append(child)
             }
             for submodule in primary.submodules {
                 list.append(item(submodule, name: submodule.name, entry: nil, note: "Submodule of \(entry.name)"))
@@ -293,6 +326,11 @@ extension AppModel {
               let current = repo.statusFingerprint, snoozed != current else { return }
         discovery.overrides.snoozed[repo.path.path] = nil
         saveDiscovery()
+    }
+
+    /// The linked worktrees of a repo, in discovery order.
+    func worktrees(of repo: RepoItem) -> [RepoItem] {
+        allRepos.filter { $0.worktreeOf == repo.id }
     }
 
     /// Projects a repo can be moved to, for the Move to Project menu.

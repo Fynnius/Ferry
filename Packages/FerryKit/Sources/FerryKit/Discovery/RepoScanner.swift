@@ -260,7 +260,7 @@ private struct Walk {
             if essentials.contains(where: { fs.isPlaceholder($0) }) {
                 return DiscoveredRepo(url: dir, isDownloaded: false)
             }
-            return DiscoveredRepo(url: dir, monorepo: monorepoKind(of: dir))
+            return DiscoveredRepo(url: dir, monorepo: monorepoKind(of: dir), lastActivity: lastActivity(gitDir: gitURL))
         }
 
         // A `.git` file: `gitdir: <path>` for worktrees, submodules and --separate-git-dir.
@@ -271,12 +271,22 @@ private struct Walk {
             guard let commonDir = canonicalURL(commonURL) else { return nil }
             // `<main>/.git` for a normal repo; the bare repo itself when worktrees hang off a bare clone.
             let parent = commonDir.lastPathComponent == ".git" ? commonDir.deletingLastPathComponent() : commonDir
-            return DiscoveredRepo(url: dir, kind: .worktree(parent: directoryURL(parent.path), branch: branch(inGitDir: gitDir)))
+            return DiscoveredRepo(url: dir, kind: .worktree(parent: directoryURL(parent.path), branch: branch(inGitDir: gitDir)), lastActivity: lastActivity(gitDir: gitDir))
         }
         if let range = gitDir.path.range(of: "/.git/modules/") {
-            return DiscoveredRepo(url: dir, kind: .submodule(parent: directoryURL(String(gitDir.path[..<range.lowerBound]))))
+            return DiscoveredRepo(url: dir, kind: .submodule(parent: directoryURL(String(gitDir.path[..<range.lowerBound]))), lastActivity: lastActivity(gitDir: gitDir))
         }
-        return DiscoveredRepo(url: dir, monorepo: monorepoKind(of: dir))
+        return DiscoveredRepo(url: dir, monorepo: monorepoKind(of: dir), lastActivity: lastActivity(gitDir: gitDir))
+    }
+
+    /// Newest of the git dir's `index` and `logs/HEAD` (see `DiscoveredRepo.lastActivity`).
+    /// Stats only; `logs` is skipped when it's a placeholder folder, since looking up a
+    /// name inside one would download it.
+    private func lastActivity(gitDir: URL) -> Date? {
+        let logs = gitDir.appendingPathComponent("logs", isDirectory: true)
+        var candidates = [gitDir.appendingPathComponent("index")]
+        if !fs.isPlaceholder(logs) { candidates.append(logs.appendingPathComponent("HEAD")) }
+        return candidates.compactMap { fs.modificationDate(of: $0) }.max()
     }
 
     /// Submodules are known from `.gitmodules`, so there's no need to walk the parent's tree.
@@ -306,7 +316,10 @@ private struct Walk {
                   let dotGit = canonicalURL(URL(fileURLWithPath: pointer)) else { continue } // Pruned worktree.
             let root = directoryURL(dotGit.deletingLastPathComponent().path)
             let downloaded = !fs.isPlaceholder(URL(fileURLWithPath: dotGit.path))
-            _ = record(DiscoveredRepo(url: root, kind: .worktree(parent: dir, branch: branch(inGitDir: gitDir)), isDownloaded: downloaded))
+            _ = record(DiscoveredRepo(
+                url: root, kind: .worktree(parent: dir, branch: branch(inGitDir: gitDir)),
+                isDownloaded: downloaded, lastActivity: downloaded ? lastActivity(gitDir: gitDir) : nil
+            ))
         }
     }
 

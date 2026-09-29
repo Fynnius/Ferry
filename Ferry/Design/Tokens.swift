@@ -43,11 +43,15 @@ extension FileChange.Kind {
 }
 
 extension SyncState {
-    /// Routine states stay secondary; orange only where the next sync needs a decision.
+    /// The same hues as `RepoUrgency.tint`: blue to push, indigo to pull, purple not on the
+    /// remote; orange where the next sync needs a decision. Always next to a count or label.
     var tint: Color {
         switch self {
-        case .diverged, .upstreamGone: .orange
-        case .ahead, .behind, .unpublished, .noRemote, .upToDate: .secondary
+        case .ahead: .blue
+        case .behind: .indigo
+        case .unpublished, .upstreamGone: .purple
+        case .diverged: .orange
+        case .noRemote, .upToDate: .secondary
         }
     }
 
@@ -82,4 +86,8 @@ enum Metrics {
     static let cardPadding: CGFloat = 16
     static let rowHeight: CGFloat = 26
     static let stackSpacing: CGFloat = 10
+    /// Inner horizontal padding of a repo row inside its group's list.
+    static let rowPadding: CGFloat = 14
+    /// Outer margin of the stack; it uses the window's full width.
+    static let stackMargin: CGFloat = 20
 }

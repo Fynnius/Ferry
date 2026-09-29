@@ -1,54 +1,54 @@
 import SwiftUI
 import FerryKit
 
-/// One repo in the stack. Repos with changes open into a composer + change list;
-/// clean repos stay a single quiet row so the ones that need you stand out.
+/// One repo: a row in its group's list. A repo with changes opens into a composer and
+/// change list under its row, lined up with the name; folded, it's one line like the rest.
 struct RepoSection: View {
     @Bindable var repo: RepoItem
     var projectCaption: String?
-    /// One row with its change count (when many repos have changes); a click opens it.
+    /// One row with its change count (folded by the user, dormant, or one of many repos
+    /// with changes); the chevron, →, or a click on the row opens it.
     var isCollapsed = false
     @Environment(AppModel.self) private var app: AppModel?
     @State private var showOutput = false
 
     var body: some View {
-        let hasChanges = (repo.status?.hasChanges ?? false) && !isCollapsed
-        // Grouped rhythm: 12 between header, banners and composer; 14 before the list.
+        let isOpen = (repo.status?.hasChanges ?? false) && !isCollapsed
+        let isCurrent = app?.currentRepoID == repo.id
         VStack(alignment: .leading, spacing: 0) {
-            RepoHeader(repo: repo, projectCaption: projectCaption, collapsedChanges: isCollapsed ? repo.status?.changedPathCount : nil)
-            if let operation = repo.status?.operation {
-                OperationBanner(repo: repo, operation: operation)
-                    .padding(.top, 12)
+            RepoHeader(repo: repo, projectCaption: projectCaption, isFolded: isCollapsed)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    // Opening is safe on any click; folding only by the chevron or ←.
+                    if isCollapsed { app?.setFolded(repo, false) } else { app?.currentRepoID = repo.id }
+                }
+            VStack(alignment: .leading, spacing: 0) {
+                if let operation = repo.status?.operation {
+                    OperationBanner(repo: repo, operation: operation)
+                        .padding(.top, 10)
+                }
+                if let problem = repo.problem {
+                    ProblemBanner(repo: repo, problem: problem, showOutput: $showOutput)
+                        .padding(.top, 10)
+                        .transition(.opacity)
+                }
+                if isOpen, let status = repo.status {
+                    CommitComposer(repo: repo)
+                        .padding(.top, 10)
+                    ChangeList(repo: repo, status: status)
+                        .padding(.top, 12)
+                }
             }
-            if let problem = repo.problem {
-                ProblemBanner(repo: repo, problem: problem, showOutput: $showOutput)
-                    .padding(.top, 12)
-                    .transition(.opacity)
-            }
-            if hasChanges, let status = repo.status {
-                CommitComposer(repo: repo)
-                    .padding(.top, 12)
-                ChangeList(repo: repo, status: status)
-                    .padding(.top, 14)
-            }
+            .padding(.leading, RepoHeader.contentInset)
         }
-        .padding(.horizontal, Metrics.cardPadding)
-        .padding(.vertical, 14)
+        .padding(.horizontal, Metrics.rowPadding)
+        .padding(.vertical, isOpen ? 12 : 8)
         .background {
-            // Quiet repos sit in the stack's grouped "Up to date" list, which draws the
-            // fill once for all of them; a card of their own would double it.
-            if repo.isActive {
-                RoundedRectangle(cornerRadius: Metrics.cardCorner)
-                    .fill(.background.secondary)
+            if isCurrent {
+                Rectangle().fill(.tint.opacity(0.06))
             }
         }
-        .overlay {
-            if app?.currentRepoID == repo.id {
-                RoundedRectangle(cornerRadius: Metrics.cardCorner)
-                    .strokeBorder(.tint.opacity(0.35), lineWidth: 1)
-            }
-        }
-        .contentShape(RoundedRectangle(cornerRadius: Metrics.cardCorner))
+        .contentShape(Rectangle())
         .simultaneousGesture(TapGesture().onEnded { app?.currentRepoID = repo.id })
         .contextMenu { RepoActionsMenuContent(repo: repo) }
         .animation(Motion.snappy, value: repo.problem)
@@ -57,12 +57,14 @@ struct RepoSection: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(accessibilitySummary)
-        .accessibilityHint(isCollapsed ? "Collapsed. Select to open it." : "")
+        .accessibilityHint(isCollapsed ? "Folded. Press Right Arrow to open it." : "")
     }
 
     private var accessibilitySummary: String {
         guard let status = repo.status else { return repo.name }
-        var parts = [repo.name, "on \(status.branch.head ?? "detached HEAD")"]
+        let name = repo.worktreeOf.flatMap { app?.repos[$0]?.name }.map { "Worktree of \($0)" } ?? repo.name
+        var parts = [name, "on \(status.branch.head ?? "detached HEAD")"]
+        if repo.urgency != .clear { parts.append(repo.urgency.title) }
         if status.hasChanges { parts.append(status.changedPathCount == 1 ? "1 change" : "\(status.changedPathCount) changes") }
         if status.syncState != .upToDate { parts.append(status.syncState.description) }
         if repo.warnsProtectedBranch { parts.append("protected branch") }
@@ -119,6 +121,7 @@ struct ProblemBanner: View {
         case .openTerminal: "Open in Terminal"
         case .openSettings: "Open Settings"
         case .retry: "Try Again"
+        case .signIn: "Sign In…"
         case .stashAndRetry(.switchTo): "Stash and Switch"
         case .stashAndRetry(.pull): "Stash and Pull"
         case .stashAndRetry(.sync): "Stash and Sync"
@@ -137,6 +140,7 @@ struct ProblemBanner: View {
             }
             return "Put your changes in the stash, then \(then). Nothing is lost: they stay in the stash until you pop them."
         case .popStash: return "Bring the stashed changes back into your working tree"
+        case .signIn: return "Fetch again and let git ask for your sign-in"
         default: return ""
         }
     }
@@ -152,6 +156,7 @@ struct ProblemBanner: View {
         case .retry:
             repo.dismissProblem()
             Task { await repo.refresh() }
+        case .signIn: Task { await repo.fetch() }
         case .stashAndRetry(let intent): Task { await repo.stashAndRetry(intent) }
         case .popStash(let stash): Task { await repo.popStash(stash) }
         }

@@ -8,30 +8,28 @@ struct MenuBarContent: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        let attention = app.allRepos.filter(\.needsAttention)
-        Text(app.attentionSummary(attention))
+        let menu = app.attentionMenu
+        Text(menu.summary)
         Divider()
-        ForEach(attention) { repo in
-            Menu {
-                if repo.status?.hasChanges == true {
-                    Button("Write Message & Commit…") { show(repo) }
+        ForEach(menu.sections) { section in
+            Section(section.urgency.title) {
+                ForEach(section.repos) { repo in
+                    repoMenu(repo, title: menu.title(for: repo))
                 }
-                switch repo.primaryAction {
-                case .sync(let a, let b):
-                    Button(QuietPrimaryButton.syncTitle(ahead: a, behind: b)) { Task { await repo.sync() } }
-                case .publish:
-                    Button("Publish Branch") { Task { await repo.publish() } }
-                default:
-                    EmptyView()
-                }
-                Divider()
-                Button("Open in Terminal") { Opener.openInTerminal(repo.path, bundleID: app.settings.terminalBundleID) }
-                Button("Reveal in Finder") { Opener.reveal(repo.path) }
-            } label: {
-                Text(repo.menuTitle)
             }
         }
-        if !attention.isEmpty { Divider() }
+        if let more = menu.moreTitle {
+            Button(more) {
+                show(nil)
+                app.selection = .attention
+            }
+        }
+        if !menu.updates.isEmpty {
+            Section(RepoUrgency.behind.title) {
+                Button(menu.pullAllTitle) { Task { await app.pullAll(menu.updates) } }
+            }
+        }
+        if !menu.sections.isEmpty || !menu.updates.isEmpty { Divider() }
         Button("Fetch All") { Task { await app.fetchAll() } }
             .disabled(app.isFetchingAll)
         Button("Open Ferry") { show(nil) }
@@ -41,6 +39,27 @@ struct MenuBarContent: View {
         Divider()
         Button("Quit Ferry") { NSApp.terminate(nil) }
             .keyboardShortcut("q")
+    }
+
+    private func repoMenu(_ repo: RepoItem, title: String) -> some View {
+        Menu {
+            if repo.status?.hasChanges == true {
+                Button("Write Message & Commit…") { show(repo) }
+            }
+            switch repo.primaryAction {
+            case .sync(let a, let b):
+                Button(QuietPrimaryButton.syncTitle(ahead: a, behind: b)) { Task { await repo.sync() } }
+            case .publish:
+                Button("Publish Branch") { Task { await repo.publish() } }
+            default:
+                EmptyView()
+            }
+            Divider()
+            Button("Open in Terminal") { Opener.openInTerminal(repo.path, bundleID: app.settings.terminalBundleID) }
+            Button("Reveal in Finder") { Opener.reveal(repo.path) }
+        } label: {
+            Text(title)
+        }
     }
 
     private func show(_ repo: RepoItem?) {

@@ -110,7 +110,8 @@ struct FleetView: View {
         NavigationSplitView(columnVisibility: $visibility) {
             SidebarView()
                 .folderDropTarget()
-                .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 320)
+                // Wide enough for "Needs Attention" and a two-digit count at the minimum.
+                .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 320)
         } detail: {
             RepoStackView()
                 .folderDropTarget(cornerRadius: Metrics.cardCorner, inset: 8)
@@ -198,6 +199,7 @@ extension FleetView {
 
 struct SidebarView: View {
     @Environment(AppModel.self) private var app
+    @State private var showsGroupSuggestions = false
 
     var body: some View {
         @Bindable var app = app
@@ -216,6 +218,11 @@ struct SidebarView: View {
                         .contextMenu {
                             if !project.isOther {
                                 Button("Rename…") { app.renameRequest = project }
+                            } else if AppleIntelligence.isAvailable {
+                                Button("Suggest Groups…") { showsGroupSuggestions = true }
+                                    .disabled(project.repos.count < 2)
+                            } else if let reason = AppleIntelligence.unavailableReason {
+                                Text(reason)
                             }
                             if let reason = project.reason {
                                 Text(reason)
@@ -225,6 +232,9 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        .sheet(isPresented: $showsGroupSuggestions) { GroupSuggestionsSheet() }
+        // The same soft edge under the toolbar as the stack and History, never a hard line.
+        .scrollEdgeEffectStyle(.soft, for: .top)
     }
 }
 
@@ -234,74 +244,72 @@ struct SidebarRow: View {
     let count: Int?
 
     var body: some View {
-        HStack {
-            Label(title, systemImage: symbol)
-            Spacer()
-            if let count {
-                Text("\(count)")
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                    .contentTransition(.numericText(value: Double(count)))
-            }
-        }
-        .accessibilityElement(children: .combine)
+        // The system sidebar badge: laid out so the title keeps its room, and hidden at 0.
+        Label(title, systemImage: symbol)
+            .badge(count ?? 0)
+            .accessibilityElement(children: .combine)
         .accessibilityValue(count.map { "\($0) need attention" } ?? "")
     }
 }
 
-/// The stack: repos that need you first (open), then the rest as quiet one-liners.
-/// ↑/↓ move between cards, ↩ jumps into the card's message field.
+/// The stack: one full-width list per group of what repos need next — Needs a Fix,
+/// Changes, Ready to Push, Not Published, Updates Available, Dormant (folded), Up to Date —
+/// each row lined up in the same columns. A repo with changes opens in place under its row.
+/// ↑/↓ move between repos, ←/→ fold and open one, ↩ jumps into its message field.
 struct RepoStackView: View {
     @Environment(AppModel.self) private var app
     @FocusState private var focusedCard: String?
+    @State private var showsDormant = false
+    @State private var columns: StackColumns?
 
     var body: some View {
-        let entries = app.entries(for: app.selection)
-        let order = (entries.active + entries.quiet).map(\.id)
-        let collapsed = app.collapsedRepoIDs(in: entries.active.map(\.repo))
+        let sections = app.entries(for: app.selection)
+        let drawnGroups = sections.groups.filter { $0.urgency != .dormant || showsDormant }
+        let order = drawnGroups.flatMap(\.entries).map(\.id)
+        let collapsed = app.collapsedRepoIDs(in: sections.repos)
         ScrollViewReader { proxy in
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: Metrics.stackSpacing) {
+            LazyVStack(alignment: .leading, spacing: 18) {
                 if let warning = app.shellWarning {
                     NoticeRow(symbol: "terminal", text: warning) { app.shellWarning = nil }
                 }
                 if let notice = app.fleetNotice {
                     NoticeRow(symbol: "sparkle.magnifyingglass", text: notice) { app.fleetNotice = nil }
                 }
-                ForEach(entries.active) { entry in
-                    card(entry, collapsed: collapsed.contains(entry.id))
+                SignInNotices()
+                if app.selection == .attention, !sections.needsYou, !sections.isEmpty, app.searchText.isEmpty {
+                    allClear(sections)
                 }
-                if !entries.quiet.isEmpty {
-                    Text("Up to date")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .padding(.top, entries.active.isEmpty ? 0 : 10)
-                        .padding(.leading, 4)
-                    // Quiet repos read as one grouped list, not a card per row.
-                    VStack(spacing: 0) {
-                        ForEach(entries.quiet) { entry in
-                            card(entry)
-                            if entry.id != entries.quiet.last?.id {
-                                Divider().padding(.leading, Metrics.cardPadding)
-                            }
+                ForEach(sections.groups) { group in
+                    VStack(alignment: .leading, spacing: 8) {
+                        groupHeader(group)
+                        if group.urgency != .dormant || showsDormant {
+                            groupList(group, collapsed: collapsed)
                         }
                     }
-                    .background(.background.secondary, in: RoundedRectangle(cornerRadius: Metrics.cardCorner))
-                    .clipShape(RoundedRectangle(cornerRadius: Metrics.cardCorner))
                 }
             }
-            .padding(16)
-            .animation(Motion.snappy, value: entries.active.map(\.id))
+            .padding(Metrics.stackMargin)
+            .animation(Motion.snappy, value: order)
             .animation(Motion.snappy, value: collapsed)
         }
         .scrollEdgeEffectStyle(.soft, for: .top)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
+            columns = StackColumns.forRowWidth(width - 2 * Metrics.stackMargin - 2 * Metrics.rowPadding)
+        }
         .onChange(of: collapsed) { _, _ in
-            // Cards opening or folding can push the current repo out of view; bring it back.
+            // Rows opening or folding can push the current repo out of view; bring it back.
             guard let id = app.currentRepoID else { return }
             withAnimation(Motion.snappy) { proxy.scrollTo(id, anchor: .top) }
         }
+        .onChange(of: app.currentRepoID.flatMap { order.firstIndex(of: $0) }) { old, new in
+            // The repo just worked in moved (a commit made it "ready to push"): keep it in view.
+            guard old != nil, new != nil, let id = app.currentRepoID else { return }
+            withAnimation(Motion.snappy) { proxy.scrollTo(id) }
+        }
         .onChange(of: app.scrollTarget) { _, id in
             guard let id else { return }
+            if sections.group(.dormant).contains(where: { $0.id == id }) { showsDormant = true }
             withAnimation(Motion.snappy) { proxy.scrollTo(id, anchor: .top) }
             app.scrollTarget = nil
         }
@@ -309,7 +317,7 @@ struct RepoStackView: View {
             guard let id else { return }
             app.focusCardRequest = nil
             focusedCard = id
-            // The lazy stack may only draw the card once the scroll reaches it.
+            // The lazy stack may only draw the row once the scroll reaches it.
             Task {
                 try? await Task.sleep(for: .milliseconds(300))
                 if app.currentRepoID == id, focusedCard != id { focusedCard = id }
@@ -321,26 +329,127 @@ struct RepoStackView: View {
             if let id { app.currentRepoID = id }
         }
         }
+        .environment(\.stackColumns, columns)
         .overlay {
-            if entries.active.isEmpty && entries.quiet.isEmpty {
+            if sections.isEmpty {
                 emptyState
             }
         }
         .navigationTitle(app.title(for: app.selection))
-        .navigationSubtitle(subtitle)
+        .navigationSubtitle(subtitle(sections))
     }
 
-    private func card(_ entry: StackEntry, collapsed: Bool = false) -> some View {
-        RepoSection(repo: entry.repo, projectCaption: caption(for: entry), isCollapsed: collapsed)
+    /// The group's symbol in its status colour, title and count. Dormant folds.
+    @ViewBuilder
+    private func groupHeader(_ group: StackGroup) -> some View {
+        let label = HStack(spacing: 6) {
+            Image(systemName: group.urgency.symbol)
+                .foregroundStyle(group.urgency.tint)
+                .accessibilityHidden(true)
+            Text(group.urgency.title)
+                .font(.headline)
+            Text("\(group.entries.count)")
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .contentTransition(.numericText(value: Double(group.entries.count)))
+        }
+        .padding(.leading, 4)
+        if group.urgency == .dormant {
+            Button {
+                Motion.animate { showsDormant.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    label
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .rotationEffect(.degrees(showsDormant ? 90 : 0))
+                        .foregroundStyle(.tertiary)
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Changes nobody has touched for six months or more. They don't count as needing you.")
+            .accessibilityLabel("Dormant, \(group.entries.count) repos, \(showsDormant ? "expanded" : "collapsed")")
+        } else {
+            label
+                .help(groupHelp(group.urgency))
+                .accessibilityElement(children: .combine)
+                .accessibilityAddTraits(.isHeader)
+        }
+    }
+
+    private func groupHelp(_ urgency: RepoUrgency) -> String {
+        switch urgency {
+        case .problem: "Conflicts, an unfinished merge or rebase, or something that failed"
+        case .changes: "Uncommitted work"
+        case .readyToPush: "Committed, not pushed yet"
+        case .unpublished: "Branches with commits that aren't on the remote"
+        case .behind: "Only a pull to do; they don't count as needing you"
+        case .dormant: ""
+        case .clear: "Nothing to do"
+        }
+    }
+
+    /// One rounded list per group, rows divided by hairlines inset to the names.
+    private func groupList(_ group: StackGroup, collapsed: Set<String>) -> some View {
+        VStack(spacing: 0) {
+            ForEach(group.entries) { entry in
+                row(entry, collapsed: collapsed.contains(entry.id))
+                if entry.id != group.entries.last?.id {
+                    Divider().padding(.leading, Metrics.rowPadding + RepoHeader.contentInset)
+                }
+            }
+        }
+        .background(.background.secondary, in: RoundedRectangle(cornerRadius: Metrics.cardCorner))
+        .clipShape(RoundedRectangle(cornerRadius: Metrics.cardCorner))
+    }
+
+    /// Needs Attention with nothing that needs you, but updates or dormant work below:
+    /// say it's clear, and what the rest is.
+    private func allClear(_ sections: StackSections) -> some View {
+        var parts: [String] = []
+        let updates = sections.group(.behind).count, dormant = sections.group(.dormant).count
+        if updates > 0 { parts.append(updates == 1 ? "1 repo has updates to pull." : "\(updates) repos have updates to pull.") }
+        if dormant > 0 { parts.append(dormant == 1 ? "1 repo has changes nobody touched in months." : "\(dormant) repos have changes nobody touched in months.") }
+        return HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Nothing needs you").font(.headline)
+                Text(parts.joined(separator: " "))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.horizontal, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func row(_ entry: StackEntry, collapsed: Bool) -> some View {
+        let repo = entry.repo
+        return RepoSection(repo: repo, projectCaption: caption(for: entry), isCollapsed: collapsed)
             .focusable()
             .focusEffectDisabled()
-            .focused($focusedCard, equals: entry.id)
+            .focused($focusedCard, equals: repo.id)
             .onKeyPress(.return) {
-                entry.repo.focusMessageCount += 1
-                return entry.repo.status?.hasChanges == true ? .handled : .ignored
+                repo.focusMessageCount += 1
+                return repo.status?.hasChanges == true ? .handled : .ignored
             }
-            .id(entry.id)
-            .transition(.repoRise)
+            // Finder outline keys: → opens a folded repo, ← folds an open one.
+            .onKeyPress(.rightArrow) {
+                guard repo.status?.hasChanges == true, collapsed else { return .ignored }
+                app.setFolded(repo, false)
+                return .handled
+            }
+            .onKeyPress(.leftArrow) {
+                guard repo.status?.hasChanges == true, !collapsed else { return .ignored }
+                app.setFolded(repo, true)
+                return .handled
+            }
+            .id(repo.id)
+            .transition(.opacity)
     }
 
     private func move(_ step: Int, in order: [String], proxy: ScrollViewProxy) -> KeyPress.Result {
@@ -356,21 +465,21 @@ struct RepoStackView: View {
         app.settings.privacyMode ? nil : entry.projectName
     }
 
-    /// Scoped to what's selected, and never repeating the sidebar's own count.
-    private var subtitle: String {
+    /// Scoped to what's selected, never repeating the sidebar's own count, and only
+    /// counting what the list can show (a worktree isn't a repo of its own here).
+    private func subtitle(_ sections: StackSections) -> String {
         func repos(_ n: Int) -> String { n == 1 ? "1 repo" : "\(n) repos" }
         switch app.selection {
         case .project(let id):
             let project = app.projects.first { $0.id == id }
-            let total = project?.repos.count ?? 0
+            let total = project?.repos.filter { $0.worktreeOf == nil }.count ?? 0
             let attention = project?.attentionCount ?? 0
             return attention == 0 ? "\(repos(total)), all clear" : "\(attention) of \(repos(total)) need you"
         case .all:
             return app.attentionCount == 0 ? "All clear" : "\(app.attentionCount) need you"
         case .attention, nil:
-            // The sidebar badge already shows the count; repeat it only when it's hidden.
-            if app.isSidebarHidden, app.attentionCount > 0 { return "\(app.attentionCount) of \(repos(app.allRepos.count)) need you" }
-            return repos(app.allRepos.count)
+            // The count itself is the sidebar badge, repeated here only while it's hidden.
+            return app.isSidebarHidden && app.attentionCount > 0 ? "\(app.attentionCount) need you" : ""
         }
     }
 

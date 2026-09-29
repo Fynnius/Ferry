@@ -119,6 +119,47 @@ struct BranchStashGraphTests {
         let empty = try await fx.makeRepo("empty")
         #expect(try await empty.log().isEmpty)
     }
+
+    /// `main` merging a long-lived `staging` branch twelve times (a PR staircase): the
+    /// log interleaves the two lines, so the graph needs two lanes, not one per merge.
+    @Test func logKeepsARepeatedlyMergedBranchNarrow() async throws {
+        let fx = try await GitFixture.make()
+        let repo = try await fx.makeRepo("staircase")
+        var time = 1_700_000_000
+        var stream = ""
+        func commit(_ ref: String, mark: Int, from: Int?, merge: Int? = nil) {
+            time += 60
+            stream += "commit refs/heads/\(ref)\nmark :\(mark)\ncommitter T <t@ferry.invalid> \(time) +0000\ndata 1\nc\n"
+            if let from { stream += "from :\(from)\n" }
+            if let merge { stream += "merge :\(merge)\n" }
+        }
+        commit("main", mark: 1, from: nil)
+        var (main, staging, mark) = (1, 1, 1)
+        for _ in 1...12 {
+            for _ in 1...2 {
+                mark += 1
+                commit("staging", mark: mark, from: staging)
+                staging = mark
+            }
+            mark += 1
+            commit("main", mark: mark, from: main, merge: staging)
+            main = mark
+        }
+        // Staging moves on, then merges main back and is checked out. Topo order would
+        // print all twelve merges before any staging commit, one open lane each.
+        for _ in 1...3 {
+            mark += 1
+            commit("staging", mark: mark, from: staging)
+            staging = mark
+        }
+        commit("staging", mark: mark + 1, from: staging, merge: main)
+        try await fx.runner.run(["fast-import", "--quiet"], in: repo.root, as: .write, stdin: Data(stream.utf8))
+        try await fx.git(["symbolic-ref", "HEAD", "refs/heads/staging"], in: repo.root)
+
+        let commits = try await repo.log()
+        #expect(commits.count == 41)
+        #expect(GraphLayout.rows(for: commits).map(\.width).max() == 2)
+    }
 }
 
 @Suite("Graph lane layout")
@@ -164,5 +205,49 @@ struct GraphLayoutTests {
         #expect(rows[0].lane == 0)
         #expect(rows[1].lane == 1)
         #expect(rows[2].lane == 0)
+    }
+
+    /// A mainline merging one long-lived branch again and again — the shape of a
+    /// `staging` → `main` PR staircase, and of the 50-merge history that pushed every
+    /// subject off-screen. Merge k takes branch commits s(2k-1) and s(2k).
+    private func staircase(merges n: Int) -> (topo: [Commit], date: [Commit]) {
+        func m(_ k: Int) -> Commit { c("m\(k)", k == 1 ? "base" : "m\(k - 1)", "s\(2 * k)") }
+        func s(_ i: Int) -> Commit { c("s\(i)", i == 1 ? "base" : "s\(i - 1)") }
+        // Topo order prints each line as a block: every merge, then the whole branch.
+        let topo = (1...n).reversed().map(m) + (1...2 * n).reversed().map(s) + [c("base")]
+        // Date order interleaves them as they happened.
+        let date = (1...n).reversed().flatMap { [m($0), s(2 * $0), s(2 * $0 - 1)] } + [c("base")]
+        return (topo, date)
+    }
+
+    @Test func repeatedMergesOfOneBranchNeedTwoLanesInDateOrder() {
+        let shape = staircase(merges: 50)
+        let date = GraphLayout.rows(for: shape.date)
+        #expect(date.allSatisfy { $0.width <= 2 })
+        // The same history in topo order holds a lane open per merge: the lanes are real
+        // (each merge's line runs down to its commit), so the fix is the order.
+        #expect(GraphLayout.rows(for: shape.topo).map(\.width).max() == 51)
+    }
+
+    @Test func lanesCloseWhereTheirCommitIs() {
+        let rows = GraphLayout.rows(for: staircase(merges: 12).topo)
+        // Every lane a merge opens ends at its branch commit: widest right after the
+        // merges, and at the root only the two real lines are left, with nothing below.
+        let branch = rows.drop { !$0.commit.id.hasPrefix("s") }
+        #expect(branch.first?.width == 13)
+        #expect(rows.last?.width == 2)
+        #expect(rows.last?.segments.contains { if case .bottom = $0.to { true } else { false } } == false)
+    }
+
+    @Test func pagingNeverChangesRowsAlreadyShown() {
+        let all = staircase(merges: 20).date
+        let full = GraphLayout.rows(for: all)
+        for page in [7, 30] {
+            let partial = GraphLayout.rows(for: Array(all.prefix(page)))
+            #expect(partial == Array(full.prefix(page)))
+            // The last loaded row's parents are on the next page: their lanes run to the
+            // bottom edge and continue there.
+            #expect(partial.last?.segments.contains { if case .bottom = $0.to { true } else { false } } == true)
+        }
     }
 }

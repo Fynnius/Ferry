@@ -106,6 +106,12 @@ public struct RepoEntry: Hashable, Sendable, Identifiable {
     public var hasDuplicates: Bool { copies.count > 1 }
     public var isMonorepo: Bool { primary.repo.monorepo != nil }
 
+    /// Newest activity in any copy or worktree: work on a branch in a worktree is work
+    /// on this repo.
+    public var lastActivity: Date? {
+        copies.flatMap { [$0.repo] + $0.worktrees }.compactMap(\.lastActivity).max()
+    }
+
     /// "2 copies on this Mac (same remote)" — nil when there's only one.
     public var duplicateSummary: String? {
         hasDuplicates ? "\(copies.count) copies on this Mac (same remote)" : nil
@@ -120,6 +126,8 @@ public enum GroupingReason: Hashable, Sendable {
     case hostOwnerLayout(host: String, owner: String)
     case sameOwnerAndStem(host: String, owner: String, stem: String)
     case foundTogether(folder: String)
+    /// Leftover repos whose names are variants of one another (`Lighthouse`, `Lighthouse-dev`).
+    case nameVariants(name: String)
     case createdByUser
 
     public var summary: String {
@@ -134,6 +142,8 @@ public enum GroupingReason: Hashable, Sendable {
             "\(Self.sameOwner(host: host, owner: owner)) · names start with “\(stem)”"
         case .foundTogether(let folder):
             "All found together in \(folder)/"
+        case .nameVariants(let name):
+            "Names are variants of “\(name)”"
         case .createdByUser:
             "Created by you"
         }
@@ -146,6 +156,7 @@ public enum GroupingReason: Hashable, Sendable {
         case .sameOwnerInFolder, .hostOwnerLayout: 2
         case .sameOwnerAndStem: 3
         case .foundTogether: 4
+        case .nameVariants: 5
         }
     }
 

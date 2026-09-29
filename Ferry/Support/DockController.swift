@@ -37,17 +37,29 @@ final class DockController: NSObject {
         let menu = NSMenu()
         menu.autoenablesItems = false
         if app.phase == .ready {
-            let attention = app.allRepos.filter(\.needsAttention)
-            let summary = NSMenuItem(title: app.attentionSummary(attention), action: nil, keyEquivalent: "")
+            let attention = app.attentionMenu
+            let summary = NSMenuItem(title: attention.summary, action: nil, keyEquivalent: "")
             summary.isEnabled = false
             menu.addItem(summary)
             menu.addItem(.separator())
-            for repo in attention {
-                let item = item(repo.menuTitle, #selector(showRepo(_:)))
-                item.representedObject = repo.id
-                menu.addItem(item)
+            for section in attention.sections {
+                menu.addItem(.sectionHeader(title: section.urgency.title))
+                for repo in section.repos {
+                    let item = item(attention.title(for: repo), #selector(showRepo(_:)))
+                    item.representedObject = repo.id
+                    menu.addItem(item)
+                }
             }
-            if !attention.isEmpty { menu.addItem(.separator()) }
+            if let more = attention.moreTitle {
+                menu.addItem(item(more, #selector(showAttention)))
+            }
+            if !attention.updates.isEmpty {
+                menu.addItem(.sectionHeader(title: RepoUrgency.behind.title))
+                let pull = item(attention.pullAllTitle, #selector(pullAll(_:)))
+                pull.representedObject = attention.updates.map(\.id)
+                menu.addItem(pull)
+            }
+            if !attention.sections.isEmpty || !attention.updates.isEmpty { menu.addItem(.separator()) }
             let fetch = item("Fetch All", #selector(fetchAll))
             fetch.isEnabled = !app.isFetchingAll
             menu.addItem(fetch)
@@ -66,6 +78,16 @@ final class DockController: NSObject {
         guard let id = sender.representedObject as? String, let repo = app.repos[id] else { return }
         openMainWindow()
         app.showFromMenu(repo)
+    }
+
+    @objc private func showAttention() {
+        openMainWindow()
+        app.selection = .attention
+    }
+
+    @objc private func pullAll(_ sender: NSMenuItem) {
+        let repos = (sender.representedObject as? [String] ?? []).compactMap { app.repos[$0] }
+        Task { await app.pullAll(repos) }
     }
 
     @objc private func fetchAll() {

@@ -21,7 +21,7 @@ public struct GitRunner: Sendable {
     }
 
     public let installation: GitInstallation
-    public let baseEnvironment: [String: String]
+    public private(set) var baseEnvironment: [String: String]
     private let limiter: AsyncSemaphore
 
     public static let sharedLimiter = AsyncSemaphore(permits: 8)
@@ -52,6 +52,21 @@ public struct GitRunner: Sendable {
     }
 
     public var executable: URL { installation.executable }
+
+    /// Whether git may ask the user for a credential through the askpass helper.
+    public var canPrompt: Bool { baseEnvironment["GIT_ASKPASS"] != nil }
+
+    /// The same runner, but nothing it starts may show UI: no askpass for git or ssh,
+    /// no Git Credential Manager window. A missing credential then fails at once as
+    /// `authenticationRequired` — what background work wants instead of a dialog nobody asked for.
+    public func withoutPrompts() -> GitRunner {
+        var copy = self
+        copy.baseEnvironment.removeValue(forKey: "GIT_ASKPASS")
+        copy.baseEnvironment.removeValue(forKey: "SSH_ASKPASS")
+        copy.baseEnvironment["SSH_ASKPASS_REQUIRE"] = "never"
+        copy.baseEnvironment["GCM_INTERACTIVE"] = "never"
+        return copy
+    }
 
     /// Runs `git <arguments>` in `directory` and returns its output, or throws `GitError`.
     @discardableResult

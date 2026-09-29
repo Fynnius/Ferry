@@ -26,6 +26,8 @@ enum RepoActivity: Hashable {
 struct RepoProblem: Identifiable, Equatable {
     enum Fix: Hashable {
         case sync, publish, pull, showOutput, openTerminal, openSettings, retry
+        /// Fetch again from the foreground, where git may show its sign-in prompt.
+        case signIn
         /// Stash every change (untracked included), then run the refused operation again.
         case stashAndRetry(RetryIntent)
         /// Bring back the stash `stashAndRetry` made.
@@ -67,7 +69,8 @@ struct RepoProblem: Identifiable, Equatable {
         case .noUpstream: fixes = [.publish]; warning = true
         case .hookFailed: fixes = [.showOutput]
         case .conflicts: fixes = [.openTerminal]
-        case .authenticationRequired, .sshKeyRejected, .hostKeyVerificationFailed, .signingFailed: fixes = [.openTerminal, .showOutput]
+        case .authenticationRequired: fixes = [.signIn, .showOutput]
+        case .sshKeyRejected, .hostKeyVerificationFailed, .signingFailed: fixes = [.openTerminal, .showOutput]
         case .identityMissing, .divergedNeedsStrategy: fixes = [.openSettings]
         case .indexLocked, .network, .timedOut: fixes = [.retry]; warning = true
         case .localChangesWouldBeOverwritten, .unstagedChangesBlockRebase:
@@ -111,14 +114,23 @@ final class RepoItem: Identifiable {
     var entryID: RepoID?
     /// Caption such as "Worktree of harbor-web" or "2 copies on this Mac".
     var note: String?
+    /// For a linked worktree: the id of the repo it belongs to.
+    var worktreeOf: String?
     /// Every local copy of this repo, primary first, when it's cloned more than once.
     var copies: [URL] = []
     var isPinned = false
     /// When the remote was last fetched (FETCH_HEAD's date — also counts fetches made
     /// outside Ferry), so ↑/↓ can be trusted.
     var lastFetchedAt: Date?
+    /// Set when a background fetch failed for want of a sign-in (the host, e.g.
+    /// `github.com`). Background work never prompts, so this stays a quiet state that the
+    /// stack sums up in one notice; any successful fetch, pull or push clears it.
+    var signInHost: String?
     /// Digest of the current status, for snoozing (see `RepoStatus.fingerprint`).
     private(set) var statusFingerprint: String?
+    /// Newest modification date among the changed files: sorts recent work first and
+    /// lets long-untouched changes go dormant. Nil when clean or nothing could be read.
+    var lastEditedAt: Date?
 
     /// Snoozed out of Needs Attention until anything in the repo changes.
     var isSnoozed: Bool {
@@ -129,6 +141,7 @@ final class RepoItem: Identifiable {
     /// "fetched 2 min ago", for tooltips next to ↑/↓ and Sync.
     var freshnessText: String {
         guard status?.hasRemote == true else { return "" }
+        if let signInHost { return "can't fetch: \(signInHost) needs a sign-in" }
         guard let lastFetchedAt else { return "not fetched yet" }
         if Date.now.timeIntervalSince(lastFetchedAt) < 60 { return "fetched just now" }
         return "fetched \(lastFetchedAt.formatted(.relative(presentation: .named)))"
@@ -153,8 +166,10 @@ final class RepoItem: Identifiable {
         status.map(PrimaryAction.init(status:)) ?? .none
     }
 
+    /// Needs the user: changes, commits to push, a problem. Behind-only and dormant repos
+    /// don't count (see `RepoUrgency`); a snooze hides everything but a failed operation.
     var needsAttention: Bool {
-        (!isSnoozed && (status?.needsAttention ?? false)) || (problem.map { !$0.isWarning && !$0.isInfo } ?? false)
+        (!isSnoozed && urgency.needsYou) || (problem.map { !$0.isWarning && !$0.isInfo } ?? false)
     }
 
     /// Stays true for a moment after a successful operation, so a repo that just became
@@ -163,6 +178,13 @@ final class RepoItem: Identifiable {
 
     /// Whether the stack shows this repo in its active section.
     var isActive: Bool { needsAttention || activity != nil || isLingering || problem != nil }
+
+    /// Worth showing above the "Up to date" list even though it doesn't need the user:
+    /// updates to pull, or dormant changes.
+    var hasSomethingPending: Bool {
+        let urgency = urgency
+        return urgency == .behind || urgency == .dormant
+    }
 
     var isProtectedBranch: Bool {
         if let isProtectedBranchOverride { return isProtectedBranchOverride }
@@ -200,7 +222,9 @@ final class RepoItem: Identifiable {
                     if new != status {
                         Motion.animate { status = new }
                     }
-                    statusFingerprint = Self.fingerprint(of: new, in: path)
+                    // An explicit open/fold lasts until the repo is clean again.
+                    if !new.hasChanges, app?.userFolded[id] != nil { app?.userFolded[id] = nil }
+                    (statusFingerprint, lastEditedAt) = Self.fingerprint(of: new, in: path)
                     lastFetchedAt = await Self.fetchDate(git)
                     app?.endSnoozeIfChanged(self)
                     if new.operation == .merge || new.operation == .cherryPick || new.operation == .revert, message.isEmpty {
@@ -226,9 +250,11 @@ final class RepoItem: Identifiable {
     @discardableResult
     func perform(_ activity: RepoActivity, retry: RepoProblem.RetryIntent? = nil, _ work: @escaping (GitRepository) async throws -> Void) async -> Bool {
         guard let git, self.activity == nil else { return false }
-        if [.pushing, .pulling, .syncing, .publishing, .fetching].contains(activity) {
-            // Git may run Ferry's askpass helper for a password; let it take focus.
-            AskpassHelper.allowPromptActivation()
+        let isNetwork = [.pushing, .pulling, .syncing, .publishing, .fetching].contains(activity)
+        if isNetwork {
+            // Git may run Ferry's askpass helper for a password; let it take focus. A repo
+            // the user acted on asks again even right after a cancel; Fetch All doesn't.
+            AskpassHelper.allowPromptActivation(forgetCancelled: app?.isFetchingAll != true)
         }
         self.activity = activity
         problem = nil
@@ -238,6 +264,7 @@ final class RepoItem: Identifiable {
         do {
             try await work(git)
             succeeded = true
+            if isNetwork { signInHost = nil }
         } catch let error as GitError where error.kind == .cancelled {
         } catch {
             if let gitError = error as? GitError {
@@ -433,13 +460,16 @@ final class RepoItem: Identifiable {
 
     /// Status plus the modification dates of the changed files, so editing an already
     /// modified file again also counts as a change (git's status alone wouldn't show it).
-    private static func fingerprint(of status: RepoStatus, in root: URL) -> String {
+    /// Also returns the newest of those dates (`lastEditedAt`).
+    private static func fingerprint(of status: RepoStatus, in root: URL) -> (String, Date?) {
         let paths = Set((status.staged + status.unstaged + status.untracked + status.conflicted).map(\.path)).sorted().prefix(500)
+        var newest: Date?
         let dates = paths.map { path -> String in
             let date = try? root.appendingPathComponent(path).resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+            if let date, date > (newest ?? .distantPast) { newest = date }
             return "\(path)@\(date?.timeIntervalSince1970 ?? 0)"
         }
-        return status.fingerprint + ":" + String(dates.joined(separator: "|").hashValue64)
+        return (status.fingerprint + ":" + String(dates.joined(separator: "|").hashValue64), newest)
     }
 
     /// FETCH_HEAD's modification date: the last fetch, pull or sync, from Ferry or not.

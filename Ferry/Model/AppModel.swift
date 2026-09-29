@@ -8,11 +8,38 @@ enum SidebarItem: Hashable {
     case project(String)
 }
 
-/// A repo to show, with the project caption used in cross-project lists.
+/// A repo to show, with the project caption used in cross-project lists. Its linked
+/// worktrees that have something going on are drawn nested under it; clean ones only
+/// appear in its worktrees menu.
 struct StackEntry: Identifiable {
     var repo: RepoItem
     var projectName: String?
     var id: String { repo.id }
+}
+
+/// Repos that need the same kind of thing next ("Changes", "Ready to Push", …).
+struct StackGroup: Identifiable {
+    var urgency: RepoUrgency
+    var entries: [StackEntry]
+    var id: RepoUrgency { urgency }
+}
+
+/// The stack for one sidebar selection: groups in urgency order, each sorted by urgency
+/// and most recent edit.
+struct StackSections {
+    var groups: [StackGroup] = []
+
+    var entries: [StackEntry] { groups.flatMap(\.entries) }
+    /// Every repo drawn, top to bottom.
+    var repos: [RepoItem] { entries.map(\.repo) }
+    var isEmpty: Bool { groups.isEmpty }
+
+    func group(_ urgency: RepoUrgency) -> [StackEntry] {
+        groups.first { $0.urgency == urgency }?.entries ?? []
+    }
+
+    /// Whether any group holds something that needs the user.
+    var needsYou: Bool { groups.contains { $0.urgency.needsYou } }
 }
 
 /// The app's single source of truth: git setup, the repo fleet, watching and fetching.
@@ -61,24 +88,48 @@ final class AppModel {
     }
     /// The repo with changes that stays open when there are too many to open them all.
     var openRepoID: String?
+    /// Cards the user opened (false) or folded (true) with the chevron, ←/→ or "N changes ›".
+    /// Beats the automatic accordion until the repo has no changes left.
+    var userFolded: [String: Bool] = [:]
 
     /// Up to this many repos with changes are all open (the VS Code feel); beyond it only
     /// one is, so the list stays readable at a glance.
     static let openAllLimit = 3
 
-    /// Which repos with changes show as one collapsed row. Repos the user is in the middle
-    /// of — typed message, running operation, visible problem — never collapse.
-    func collapsedRepoIDs(in active: [RepoItem]) -> Set<String> {
-        let dirty = active.filter { $0.status?.hasChanges == true }
-        guard dirty.count > Self.openAllLimit else { return [] }
-        let open = dirty.first { $0.id == currentRepoID }?.id
-            ?? dirty.first { $0.id == openRepoID }?.id
-            ?? dirty.first?.id
-        return Set(dirty.filter { repo in
-            repo.id != open
-                && repo.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                && repo.activity == nil && repo.problem == nil && !repo.isGeneratingMessage
-        }.map(\.id))
+    /// Which repos with changes show as one collapsed row. The user's own open/fold wins;
+    /// otherwise dormant repos fold, and beyond `openAllLimit` only one repo stays open.
+    /// The accordion never folds a repo the user is in the middle of — typed message,
+    /// running operation, visible problem.
+    func collapsedRepoIDs(in shown: [RepoItem]) -> Set<String> {
+        let dirty = shown.filter { $0.status?.hasChanges == true }
+        var collapsed = Set(dirty.filter { $0.urgency == .dormant && !$0.isActive }.map(\.id))
+        let accordion = dirty.filter { !collapsed.contains($0.id) }
+        if accordion.count > Self.openAllLimit {
+            let open = accordion.first { $0.id == currentRepoID }?.id
+                ?? accordion.first { $0.id == openRepoID }?.id
+                ?? accordion.first?.id
+            collapsed.formUnion(accordion.filter { repo in
+                repo.id != open
+                    && repo.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    && repo.activity == nil && repo.problem == nil && !repo.isGeneratingMessage
+            }.map(\.id))
+        }
+        for repo in dirty {
+            switch userFolded[repo.id] {
+            case true?: collapsed.insert(repo.id)
+            case false?: collapsed.remove(repo.id)
+            case nil: break
+            }
+        }
+        return collapsed
+    }
+
+    /// Opens or folds a card on purpose. Opening also makes it the current repo.
+    func setFolded(_ repo: RepoItem, _ folded: Bool) {
+        Motion.animate {
+            userFolded[repo.id] = folded
+            if !folded { currentRepoID = repo.id }
+        }
     }
 
     // Discovery (see AppModel+Fleet.swift)
@@ -106,6 +157,8 @@ final class AppModel {
 
     /// No network: background fetch pauses and the toolbar says so.
     var isOffline = false
+    /// Hosts whose "needs a sign-in" notice the user dismissed this session.
+    var dismissedSignInHosts: Set<String> = []
     /// When the folders were last scanned, to rescan on activation when it's stale.
     var lastScanAt: Date?
 
@@ -132,7 +185,7 @@ final class AppModel {
 
     /// What menu commands act on: the current repo, else the first one needing attention.
     var commandTarget: RepoItem? {
-        currentRepo ?? entries(for: selection).active.first?.repo
+        currentRepo ?? entries(for: selection).groups.first { $0.urgency.needsYou }?.entries.first?.repo
     }
 
     // MARK: - Startup
@@ -182,12 +235,18 @@ final class AppModel {
         await scheduler?.update(repoIDs: fetchableRepoIDs)
     }
 
+    /// Fetches every repo without prompting: a missing credential joins the one sign-in
+    /// notice per host instead of a banner on each repo (its button signs in once).
     func fetchAll() async {
         guard !isFetchingAll else { return }
         isFetchingAll = true
+        dismissedSignInHosts = []
         await withTaskGroup(of: Void.self) { group in
             for repo in allRepos where repo.status?.hasRemote ?? true {
-                group.addTask { await repo.fetch() }
+                group.addTask { [weak self] in
+                    guard let self, await self.backgroundFetch(repo.id, showsFailures: true) == .success else { return }
+                    await self.fetchedManually(repo)
+                }
             }
         }
         isFetchingAll = false
@@ -246,18 +305,53 @@ final class AppModel {
         }
     }
 
+    /// Settings → General → Run Setup Again: forgets the folders, the last scan and every
+    /// grouping change (renames, moves, hidden, pinned, snoozes), then shows setup. Nothing
+    /// in the repos is touched. Preferences stay, and so does the OpenAI key — it only
+    /// goes when removed in Settings → AI.
+    func runSetupAgain() {
+        try? FileManager.default.removeItem(at: fleetStore.settingsURL)
+        try? FileManager.default.removeItem(at: fleetStore.lastScanURL)
+        Task { [scheduler] in await scheduler?.stop() }
+        watcher?.watch([])
+        discovery = DiscoverySettings()
+        lastScan = nil
+        lastScanAt = nil
+        grouping = Grouping()
+        projects = []
+        repos = [:]
+        scanFound = []
+        currentRepoID = nil
+        openRepoID = nil
+        userFolded = [:]
+        dismissedSignInHosts = []
+        fleetNotice = nil
+        searchText = ""
+        selection = .attention
+        phase = .onboarding
+    }
+
     /// Applies changed fetch settings.
     func fetchSettingsChanged() {
         startFetching()
     }
 
-    private func backgroundFetch(_ id: String) async -> FetchOutcome {
+    /// Never prompts: a missing credential marks the repo `signInHost` (summed up in one
+    /// notice above the stack) and the scheduler backs off until the user signs in.
+    /// `showsFailures` (Fetch All) puts any other failure on the repo's card.
+    func backgroundFetch(_ id: String, showsFailures: Bool = false) async -> FetchOutcome {
         guard let repo = repos[id], let git = repo.git, repo.activity == nil else { return .success }
         do {
-            try await git.fetch(timeout: .seconds(120))
+            try await git.fetch(timeout: .seconds(120), allowPrompts: false)
+            repo.signInHost = nil
             await repo.refresh()
             return .success
         } catch {
+            if let error = error as? GitError, error.kind == .authenticationRequired {
+                repo.signInHost = error.remoteHost ?? "the remote"
+            } else if showsFailures, (error as? GitError)?.kind != .cancelled {
+                repo.problem = RepoProblem(error)
+            }
             return FetchOutcome(error)
         }
     }
@@ -390,24 +484,41 @@ final class AppModel {
 
     // MARK: - What the detail shows
 
-    /// Repos for the sidebar selection, split into those that need the user and the rest.
-    func entries(for selection: SidebarItem?) -> (active: [StackEntry], quiet: [StackEntry]) {
-        let entries: [StackEntry]
-        switch selection {
-        case .project(let id):
-            entries = projects.first { $0.id == id }?.repos.map { StackEntry(repo: $0, projectName: nil) } ?? []
-        default:
-            entries = projects.flatMap { project in project.repos.map { StackEntry(repo: $0, projectName: project.name) } }
+    /// Repos for the sidebar selection, grouped by what they need next. A worktree is a
+    /// row of its own like any repo, but only while it has something going on; clean ones
+    /// live in their repo's "…" menu. Needs Attention leaves out what's up to date.
+    func entries(for selection: SidebarItem?) -> StackSections {
+        let scope: [(ProjectItem, String?)] = switch selection {
+        case .project(let id): projects.filter { $0.id == id }.map { ($0, nil) }
+        default: projects.map { ($0, $0.name) }
+        }
+        var entries: [StackEntry] = []
+        for (project, caption) in scope {
+            for repo in project.repos {
+                if repo.worktreeOf != nil, repo.urgency == .clear, !repo.isActive { continue }
+                if selection == .attention, !repo.isActive, !repo.hasSomethingPending { continue }
+                entries.append(StackEntry(repo: repo, projectName: caption))
+            }
         }
         let query = searchText.trimmingCharacters(in: .whitespaces)
-        let filtered = query.isEmpty ? entries : entries.filter {
-            $0.repo.name.localizedCaseInsensitiveContains(query)
-                || ($0.projectName?.localizedCaseInsensitiveContains(query) ?? false)
-                || ($0.repo.status?.branch.head?.localizedCaseInsensitiveContains(query) ?? false)
+        if !query.isEmpty {
+            entries = entries.filter { entry in
+                entry.repo.name.localizedCaseInsensitiveContains(query)
+                    || entry.projectName?.localizedCaseInsensitiveContains(query) == true
+                    || (entry.repo.status?.branch.head?.localizedCaseInsensitiveContains(query) ?? false)
+            }
         }
-        let active = filtered.filter { $0.repo.isActive }
-        let quiet = selection == .attention ? [] : filtered.filter { !$0.repo.isActive }
-        return (active, quiet)
+        let grouped = Dictionary(grouping: entries) { groupUrgency(of: $0.repo) }
+        return StackSections(groups: RepoUrgency.allCases.compactMap { urgency in
+            guard let entries = grouped[urgency] else { return nil }
+            return StackGroup(urgency: urgency, entries: entries.sorted { $0.repo.comesBefore($1.repo) })
+        })
+    }
+
+    /// The group a repo shows in. A snoozed repo waits with the up-to-date ones.
+    func groupUrgency(of repo: RepoItem) -> RepoUrgency {
+        if repo.isSnoozed, !repo.isActive { return .clear }
+        return repo.urgency
     }
 
     func title(for selection: SidebarItem?) -> String {

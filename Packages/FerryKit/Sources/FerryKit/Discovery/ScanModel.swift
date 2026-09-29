@@ -37,13 +37,19 @@ public struct DiscoveredRepo: Hashable, Sendable, Codable {
     public var monorepo: MonorepoKind?
     /// Fetch URL of `origin` (or the first remote), as git reports it — `insteadOf` applied.
     public var remoteURL: String?
+    /// When someone last worked in the repo: the newest of its git dir's `index` (staging,
+    /// commits, checkouts) and `logs/HEAD` (commits, checkouts, pulls). A fetch doesn't
+    /// count. Read with a stat, nil when neither exists or the repo isn't downloaded.
+    /// Edits that were never staged or committed don't show here.
+    public var lastActivity: Date?
 
-    public init(url: URL, kind: Kind = .repository, isDownloaded: Bool = true, monorepo: MonorepoKind? = nil, remoteURL: String? = nil) {
+    public init(url: URL, kind: Kind = .repository, isDownloaded: Bool = true, monorepo: MonorepoKind? = nil, remoteURL: String? = nil, lastActivity: Date? = nil) {
         self.url = url
         self.kind = kind
         self.isDownloaded = isDownloaded
         self.monorepo = monorepo
         self.remoteURL = remoteURL
+        self.lastActivity = lastActivity
     }
 
     public var name: String { url.lastPathComponent }

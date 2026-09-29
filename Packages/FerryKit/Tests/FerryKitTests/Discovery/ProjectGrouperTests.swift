@@ -143,6 +143,58 @@ struct ProjectGrouperTests {
         #expect(grouping.projects.isEmpty)
     }
 
+    // MARK: Name variants (leftovers only)
+
+    @Test func nameVariantsGroupAcrossOwners() {
+        let grouping = grouper.group(Self.scan([
+            Self.repo("/code/ChartScope-Screener", "git@github.com:me/ChartScope-Screener.git"),
+            Self.repo("/code/misc/ChartScope.Screener", "git@github.com:someone/ChartScope.Screener.git"),
+            Self.repo("/code/ChartScope.Screener_backup"),
+            Self.repo("/code/Lighthouse", "git@github.com:me/Lighthouse.git"),
+            Self.repo("/code/Lighthouse-dev", "git@github.com:other/Lighthouse-dev.git"),
+            Self.repo("/code/Storefront"), Self.repo("/code/StorefrontV2"),
+            Self.repo("/code/FinancialDataProcessor"), Self.repo("/code/FinancialDataProcessor Kopie"),
+            Self.repo("/code/notes"),
+        ]))
+        let byName = Dictionary(uniqueKeysWithValues: grouping.projects.map { ($0.name, names($0)) })
+        #expect(byName["ChartScope-Screener"] == ["ChartScope-Screener", "ChartScope.Screener", "ChartScope.Screener_backup"])
+        #expect(byName["Lighthouse"] == ["Lighthouse", "Lighthouse-dev"])
+        #expect(byName["Storefront"] == ["Storefront", "StorefrontV2"])
+        #expect(byName["FinancialDataProcessor"] == ["FinancialDataProcessor", "FinancialDataProcessor Kopie"])
+        #expect(grouping.projects.first { $0.name == "Lighthouse" }?.why == "Names are variants of “Lighthouse”")
+        #expect(grouping.other.map(\.name) == ["notes"])
+    }
+
+    @Test func nameVariantsNeedADistinctiveWholeName() {
+        let grouping = grouper.group(Self.scan([
+            // Generic: shorter than the minimum.
+            Self.repo("/code/a/frontend"), Self.repo("/code/b/frontend-v2"),
+            Self.repo("/code/Echo_STT"), Self.repo("/code/Echo_STT-paste"),
+            // Long, but only starting alike, or continuing mid-word.
+            Self.repo("/code/harborapplication"), Self.repo("/code/harborapplicant"),
+            Self.repo("/code/notification"), Self.repo("/code/notifications"),
+        ]))
+        #expect(grouping.projects.isEmpty)
+    }
+
+    @Test func nameVariantsNeverTakeReposFromAProject() {
+        let grouping = grouper.group(Self.scan([
+            Self.repo("/code/Harbor/Lighthouse", "git@github.com:acme/Lighthouse.git"),
+            Self.repo("/code/Harbor/api", "git@github.com:acme/api.git"),
+            Self.repo("/code/Lighthouse-dev"),
+        ]))
+        #expect(grouping.projects.count == 1)
+        #expect(names(grouping.projects.first) == ["api", "Lighthouse"])
+        #expect(grouping.other.map(\.name) == ["Lighthouse-dev"])
+    }
+
+    @Test func nameVariantsRespectNotRelated() {
+        let scan = Self.scan([Self.repo("/code/Lighthouse"), Self.repo("/code/Lighthouse-dev")])
+        let apart = RepoPair(RepoID("path:/code/Lighthouse"), RepoID("path:/code/Lighthouse-dev"))
+        #expect(grouper.group(scan).projects.count == 1)
+        #expect(grouper.group(scan, keepingApart: [apart]).projects.isEmpty)
+    }
+
     @Test func sameOwnerAndStemGroupsAcrossFolders() {
         let grouping = grouper.group(Self.scan([
             Self.repo("/code/harbor-app", "git@github.com:acme/harbor-app.git"),

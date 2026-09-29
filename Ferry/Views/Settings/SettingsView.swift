@@ -7,9 +7,9 @@ struct SettingsView: View {
     var body: some View {
         TabView {
             // Each pane has its own height; the window resizes between them like System Settings panes.
-            Tab("General", systemImage: "gearshape") { GeneralSettings().frame(height: 470) }
+            Tab("General", systemImage: "gearshape") { GeneralSettings().frame(height: 540) }
             Tab("Folders", systemImage: "folder") { FolderSettings().frame(height: 500) }
-            Tab("Git", systemImage: "arrow.triangle.branch") { GitSettings().frame(height: 480) }
+            Tab("Git", systemImage: "arrow.triangle.branch") { GitSettings().frame(height: 600) }
             Tab("AI", systemImage: "sparkles") { AISettings().frame(height: 250) }
         }
         .frame(width: 540)
@@ -18,8 +18,10 @@ struct SettingsView: View {
 
 struct GeneralSettings: View {
     @Environment(AppModel.self) private var app
+    @Environment(\.openWindow) private var openWindow
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var loginError: String?
+    @State private var confirmsSetup = false
 
     private func setLaunchAtLogin(_ enabled: Bool) {
         do {
@@ -64,8 +66,26 @@ struct GeneralSettings: View {
                     Text(loginError).foregroundStyle(.red)
                 }
             }
+            Section {
+                LabeledContent("Setup") {
+                    Button("Run Setup Again…") { confirmsSetup = true }
+                }
+            } footer: {
+                Text("Choose folders and repositories from scratch. Your preferences and OpenAI key stay.")
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
+        .alert("Run setup again?", isPresented: $confirmsSetup) {
+            Button("Run Setup Again", role: .destructive) {
+                app.runSetupAgain()
+                openWindow(id: "main")
+                NSApp.activate()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Ferry forgets its folders and how you organised the repos — hidden and pinned repos, project names and moves, snoozes — and shows setup. Nothing in your repositories changes. Your preferences and OpenAI key stay.")
+        }
         .onChange(of: settings.globalHotKeyEnabled) { _, enabled in GlobalHotKey.shared.setEnabled(enabled) }
         .onChange(of: settings.autoFetch) { app.fetchSettingsChanged() }
         .onChange(of: settings.fetchIntervalMinutes) { app.fetchSettingsChanged() }
@@ -103,6 +123,7 @@ struct FolderSettings: View {
                     Button("Rescan Now") { Task { await app.rescan() } }
                         .disabled(app.isScanning)
                 }
+                SuggestGroupsButton()
             } header: {
                 Text("Folders to scan")
             } footer: {
@@ -136,10 +157,20 @@ struct FolderSettings: View {
 struct GitSettings: View {
     @Environment(AppModel.self) private var app
     @State private var newBranch = ""
+    @State private var github = GitHubConnection()
 
     var body: some View {
         @Bindable var settings = app.settings
         Form {
+            Section {
+                GitHubSignInDetail(connection: github, prominent: false)
+            } header: {
+                Text("GitHub sign-in")
+            } footer: {
+                Text("For repos that use GitHub over HTTPS. SSH remotes (git@github.com:…) sign in with your SSH keys instead.")
+                    .foregroundStyle(.secondary)
+            }
+            .task { await github.load(app) }
             Section {
                 Picker("When pulling diverged branches", selection: $settings.pullStrategy) {
                     Text("Merge").tag(GitRepository.PullStrategy.merge)

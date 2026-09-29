@@ -15,11 +15,18 @@ public struct Commit: Hashable, Sendable, Identifiable {
 }
 
 extension GitRepository {
-    /// A page of history for the graph, newest first in topological order. By default the
-    /// current branch plus its upstream, like VS Code's graph; `allBranches` shows every ref.
+    /// A page of history for the graph, newest first: parents always after their children,
+    /// otherwise by commit date. By default the current branch plus its upstream, like VS
+    /// Code's graph; `allBranches` shows every ref.
+    ///
+    /// Date order, not `--topo-order`: topo order lists each line of history as one block,
+    /// so a mainline that merges a long-lived branch again and again (a `staging` → `main`
+    /// PR staircase) prints every merge before any of the branch's commits, and each merge
+    /// holds its own lane open down to its commit — 50 merges, 50 lanes. Date order
+    /// interleaves the two lines as they happened and draws them in two or three lanes.
     public func log(limit: Int = 200, skip: Int = 0, allBranches: Bool = false) async throws -> [Commit] {
         guard try await hasCommits() else { return [] }
-        var args = ["log", "-z", "--topo-order", "--format=%H%x1f%P%x1f%D%x1f%an%x1f%ae%x1f%at%x1f%s", "--max-count=\(limit)", "--skip=\(skip)"]
+        var args = ["log", "-z", "--date-order", "--format=%H%x1f%P%x1f%D%x1f%an%x1f%ae%x1f%at%x1f%s", "--max-count=\(limit)", "--skip=\(skip)"]
         if allBranches {
             args.append("--all")
         } else {

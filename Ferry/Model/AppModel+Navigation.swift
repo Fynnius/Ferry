@@ -5,8 +5,7 @@ extension AppModel {
     /// The repo `step` places away from the current one, in the order the stack shows the
     /// current list, that needs the user. Wraps around; the current repo itself comes last.
     func repoNeedingYou(step: Int) -> RepoItem? {
-        let entries = entries(for: selection)
-        let order = (entries.active + entries.quiet).map(\.repo)
+        let order = entries(for: selection).repos
         let count = order.count
         guard count > 0 else { return nil }
         let start = currentRepoID.flatMap { id in order.firstIndex { $0.id == id } } ?? (step > 0 ? -1 : count)
@@ -29,6 +28,8 @@ extension AppModel {
     /// Makes `repo` current, scrolls to it and puts the keyboard where its work is: the
     /// message field when it has changes, else the card itself.
     func focus(_ repo: RepoItem) {
+        // Going to a repo means working in it: a card the user folded opens again.
+        if userFolded[repo.id] == true { userFolded[repo.id] = nil }
         currentRepoID = repo.id
         scrollTarget = repo.id
         guard repo.status?.hasChanges == true else {

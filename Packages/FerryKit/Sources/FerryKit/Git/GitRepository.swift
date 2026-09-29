@@ -162,7 +162,10 @@ public final class GitRepository: Sendable {
 
     // MARK: - Remote operations
 
-    public func fetch(timeout: Duration? = nil, onProgress: (@Sendable (String) -> Void)? = nil) async throws {
+    /// - Parameter allowPrompts: false for background fetches: a missing credential fails
+    ///   as `authenticationRequired` instead of showing a sign-in dialog.
+    public func fetch(timeout: Duration? = nil, allowPrompts: Bool = true, onProgress: (@Sendable (String) -> Void)? = nil) async throws {
+        let runner = allowPrompts ? runner : runner.withoutPrompts()
         try await runner.run(["fetch", "--progress"], in: root, as: .network, timeout: timeout, onProgress: onProgress)
     }
 

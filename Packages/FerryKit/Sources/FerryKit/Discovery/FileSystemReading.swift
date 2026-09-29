@@ -27,6 +27,8 @@ public protocol FileSystemReading: Sendable {
     func isPlaceholder(_ url: URL) -> Bool
     /// Reads a small file. The scanner only calls this after `isPlaceholder` said no.
     func contents(of file: URL) throws -> Data
+    /// Modification date of an item, nil when it doesn't exist. Metadata only (a stat).
+    func modificationDate(of url: URL) -> Date?
 }
 
 /// The real disk. Placeholder state comes from `URLResourceValues` (iCloud) and the
@@ -63,6 +65,12 @@ public struct LocalFileSystem: FileSystemReading {
 
     public func contents(of file: URL) throws -> Data {
         try Data(contentsOf: file)
+    }
+
+    public func modificationDate(of url: URL) -> Date? {
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else { return nil }
+        return Date(timeIntervalSince1970: TimeInterval(info.st_mtimespec.tv_sec) + TimeInterval(info.st_mtimespec.tv_nsec) / 1e9)
     }
 
     private static func isNotDownloaded(_ values: URLResourceValues?) -> Bool {

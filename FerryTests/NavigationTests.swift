@@ -22,17 +22,18 @@ struct NavigationTests {
         let a = item("a", changes: true), b = item("b"), c = item("c", ahead: 1), d = item("d", changes: true)
         app.projects = [ProjectItem(id: "p", name: "P", repos: [a, b, c, d])]
         app.selection = .all
+        // Stack order is by urgency: a, d (changes), c (ready to push), then b (up to date).
 
         #expect(app.repoNeedingYou(step: 1)?.id == "a", "nothing current: start at the top")
-        #expect(app.repoNeedingYou(step: -1)?.id == "d", "…or at the bottom going back")
+        #expect(app.repoNeedingYou(step: -1)?.id == "c", "…or at the bottom going back")
         app.currentRepoID = "a"
-        #expect(app.repoNeedingYou(step: 1)?.id == "c", "b is up to date")
-        app.currentRepoID = "d"
-        #expect(app.repoNeedingYou(step: 1)?.id == "a", "wraps around")
-        #expect(app.repoNeedingYou(step: -1)?.id == "c")
+        #expect(app.repoNeedingYou(step: 1)?.id == "d")
+        app.currentRepoID = "c"
+        #expect(app.repoNeedingYou(step: 1)?.id == "a", "b is up to date, so next wraps around")
+        #expect(app.repoNeedingYou(step: -1)?.id == "d")
         app.currentRepoID = "b"
         #expect(app.repoNeedingYou(step: 1)?.id == "a", "quiet repos sit at the bottom of the stack, so next wraps to the top")
-        #expect(app.repoNeedingYou(step: -1)?.id == "d")
+        #expect(app.repoNeedingYou(step: -1)?.id == "c")
 
         app.projects = [ProjectItem(id: "p", name: "P", repos: [a, b])]
         app.currentRepoID = "a"
@@ -47,15 +48,17 @@ struct NavigationTests {
         app.projects = [ProjectItem(id: "p", name: "P", repos: [dirty, ahead])]
         app.repos = ["dirty": dirty, "ahead": ahead]
 
+        app.userFolded["dirty"] = true
         app.goToRepoNeedingYou(step: 1)
-        #expect(app.currentRepoID == "dirty")
+        #expect(app.currentRepoID == "dirty", "changes come first")
         #expect(app.scrollTarget == "dirty")
         #expect(app.openRepoID == "dirty", "a collapsed repo opens")
+        #expect(app.userFolded["dirty"] == nil, "…even one the user folded")
         #expect(dirty.focusMessageCount == 1)
 
         app.goToRepoNeedingYou(step: 1)
         #expect(app.currentRepoID == "ahead")
-        #expect(app.focusCardRequest == "ahead")
+        #expect(app.focusCardRequest == "ahead", "nothing to type: the row takes focus")
         #expect(ahead.focusMessageCount == 0)
     }
 

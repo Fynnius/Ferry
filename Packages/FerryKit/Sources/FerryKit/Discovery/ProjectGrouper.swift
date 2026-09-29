@@ -19,9 +19,12 @@ import Foundation
 /// - **Same owner + name stem**: repos of one owner whose names start with the same
 ///   word (`harbor-app`, `harbor-admin`), wherever they are on disk.
 /// - **Found together**: as the folder rule, but with mixed or missing owners.
+/// - **Name variants**, last and only among repos nothing above placed: names that are
+///   one another plus punctuation or a new word (`Lighthouse` / `Lighthouse-dev`), at
+///   least `variantMinimumLength` letters long. See `variantProjects`.
 ///
-/// Never a signal on its own: name similarity without a shared owner, and the owner
-/// alone. A personal account typically owns dozens of unrelated repos and nothing
+/// Never a signal on its own: names that merely start alike without a shared owner, and
+/// the owner alone. A personal account typically owns dozens of unrelated repos and nothing
 /// offline tells it from an organisation, so the owner only counts when a folder or a
 /// name stem backs it up.
 ///
@@ -98,6 +101,10 @@ public struct ProjectGrouper: Sendable {
                 reasons: reasons,
                 repos: Self.sortedRepos(members.compactMap { byID[$0] })
             ))
+        }
+        for project in Self.variantProjects(entries.filter { !grouped.contains($0.id) }, notRelated: notRelated) {
+            grouped.formUnion(project.repos.map(\.id))
+            projects.append(project)
         }
         return Grouping(
             projects: Self.sortedProjects(projects),
@@ -257,6 +264,75 @@ public struct ProjectGrouper: Sendable {
         }
         guard word.count >= 3 else { return nil }
         return (word.lowercased(), word)
+    }
+
+    // MARK: - Name variants (leftovers only)
+
+    /// Names shorter than this (letters and digits) are too generic to group by:
+    /// `frontend`, `dotfiles` and `homepage` are 8.
+    static let variantMinimumLength = 9
+
+    /// Among repos no other rule placed: names that are variants of one another group,
+    /// whoever owns them — `ChartScope-Screener` / `ChartScope.Screener`, `Lighthouse` /
+    /// `Lighthouse-dev`, `Storefront` / `StorefrontV2`. Safe because it only
+    /// sees leftovers (it never pulls a repo out of a project) and only joins names where
+    /// one is the whole other one, ignoring case and punctuation, optionally followed by a
+    /// new word (`-dev`, `V2`, ` Kopie`) — never two names that merely start alike
+    /// (`harbor-app` / `harbor-admin`), so a big account's repos can't chain together.
+    static func variantProjects(_ leftovers: [RepoEntry], notRelated: Set<RepoPair>) -> [Project] {
+        let keyed = leftovers.map { (entry: $0, key: normalizedName($0.name)) }
+            .filter { $0.key.count >= variantMinimumLength }
+            .sorted { ($0.key.count, $0.entry.id) < ($1.key.count, $1.entry.id) }
+        var sets = DisjointSets(keyed.map(\.entry.id), notRelated: notRelated)
+        for (i, short) in keyed.enumerated() {
+            for long in keyed[(i + 1)...] where isVariant(long.entry.name, of: short.key) {
+                sets.union(short.entry.id, long.entry.id)
+            }
+        }
+        var seen: Set<RepoID> = []
+        var projects: [Project] = []
+        for item in keyed where !seen.contains(item.entry.id) {
+            let members = sets.members(of: item.entry.id)
+            seen.formUnion(members)
+            guard members.count >= 2 else { continue }
+            // Named after the shortest member (the first in `keyed` order): the base name.
+            let repos = keyed.filter { members.contains($0.entry.id) }.map(\.entry)
+            let name = repos[0].name
+            projects.append(Project(
+                id: ProjectID("name:\(normalizedName(name))"),
+                name: name,
+                reasons: [.nameVariants(name: name)],
+                repos: sortedRepos(repos)
+            ))
+        }
+        return projects
+    }
+
+    /// Letters and digits only, lowercased: `ChartScope.Screener` → `chartscopescreener`.
+    static func normalizedName(_ name: String) -> String {
+        name.filter { $0.isLetter || $0.isNumber }.lowercased()
+    }
+
+    /// Whether `name` normalizes to `key`, or to `key` followed by a new word: the next
+    /// character after the matched part is punctuation, a space, a digit, or an upper-case
+    /// letter after a lower-case one.
+    static func isVariant(_ name: String, of key: String) -> Bool {
+        let chars = Array(name)
+        var remaining = key[...]
+        var index = 0
+        while !remaining.isEmpty, index < chars.count {
+            let char = chars[index]
+            if char.isLetter || char.isNumber {
+                let lower = char.lowercased()
+                guard remaining.hasPrefix(lower) else { return false }
+                remaining = remaining.dropFirst(lower.count)
+            }
+            index += 1
+        }
+        guard remaining.isEmpty else { return false }
+        guard index < chars.count else { return true }
+        let next = chars[index]
+        return !next.isLetter || (next.isUppercase && chars[index - 1].isLowercase)
     }
 
     // MARK: - Ordering

@@ -223,4 +223,10 @@ final class SimulatedCloudFileSystem: FileSystemReading {
         log.withLock { $0.read.append(normalizedPath(file.path)) }
         return try base.contents(of: file)
     }
+
+    /// Counted as a read: even a stat inside a placeholder folder would materialize it.
+    func modificationDate(of url: URL) -> Date? {
+        log.withLock { $0.read.append(normalizedPath(url.path)) }
+        return base.modificationDate(of: url)
+    }
 }

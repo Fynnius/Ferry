@@ -106,19 +106,20 @@ struct AppModelTests {
         app.projects = [ProjectItem(id: "p", name: "Harbor", repos: [dirty, ahead, clean])]
 
         let attention = app.entries(for: .attention)
-        #expect(attention.active.map(\.id) == ["web", "api"])
-        #expect(attention.quiet.isEmpty)
-        #expect(attention.active.first?.projectName == "Harbor")
+        #expect(attention.groups.map(\.urgency) == [.changes, .readyToPush], "changes first, then what's ready to push")
+        #expect(attention.repos.map(\.id) == ["web", "api"])
+        #expect(attention.group(.clear).isEmpty)
+        #expect(attention.entries.first?.projectName == "Harbor")
 
         let all = app.entries(for: .all)
-        #expect(all.quiet.map(\.id) == ["docs"])
+        #expect(all.group(.clear).map(\.id) == ["docs"])
 
         let project = app.entries(for: .project("p"))
-        #expect(project.active.first?.projectName == nil)
+        #expect(project.entries.first?.projectName == nil)
 
         app.searchText = "DOC"
-        #expect(app.entries(for: .all).quiet.map(\.id) == ["docs"])
-        #expect(app.entries(for: .all).active.isEmpty)
+        #expect(app.entries(for: .all).group(.clear).map(\.id) == ["docs"])
+        #expect(app.entries(for: .all).group(.changes).isEmpty)
         #expect(app.attentionCount == 2)
     }
 

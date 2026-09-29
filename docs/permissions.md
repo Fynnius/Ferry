@@ -46,7 +46,7 @@ Enter your login password and click **Always Allow**. If you'd rather not, remov
 
 Ferry runs the git you already have, with your credential helper, SSH agent and signing setup. Two things can appear:
 
-- **A username/password dialog from Ferry** — git asked for HTTPS credentials your credential helper doesn't have. Ferry passes the answer straight to git and never stores it; your credential helper (usually the macOS Keychain) does.
+- **A sign-in dialog from Ferry** — git asked for HTTPS credentials your credential helper doesn't have. It only appears for something you started (push, pull, sync, fetch), one at a time; background fetches never ask. Ferry passes the answer straight to git and never stores it; your credential helper (usually the macOS Keychain) does. For GitHub it never asks for a password — GitHub doesn't accept them — but offers to connect the GitHub CLI or takes a token ([Signing in to GitHub](install.md#signing-in-to-github)).
 - **Your SSH agent's or password manager's prompt** (e.g. 1Password) — that's your agent, as in Terminal.
 
 SSH connections never prompt inside Ferry for a passphrase or host key. If a push fails with an authentication error, run `git push` once in Terminal (Ferry's **Open in Terminal**, ⌃⌘T) to accept the host key or unlock the key, then try again.

@@ -11,15 +11,15 @@ Ferry is a small native macOS app for the part of a code editor's Source Control
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/screenshot-dark.png" />
-    <img src="docs/screenshot.png" alt="Ferry's main window: projects in the sidebar, repos that need you stacked on the right — one open with its commit message field and staged files, others offering Sync or Publish Branch" width="900" />
+    <img src="docs/screenshot.png" alt="Ferry's main window: projects in the sidebar; on the right, repos grouped into Changes, Ready to Push and Updates Available — one open with its commit message field and files, the others one aligned row each with their branch, what they need and a Push, Pull or Publish button" width="900" />
   </picture>
 </p>
 
 ## Features
 
-- **One list of what needs you.** Repos with changes, commits to push or pull, an unpublished branch or a merge in progress rise to the top; clean repos fold into one quiet line. Related repos are grouped into projects automatically — from your `.code-workspace` files, shared GitHub owners and folders — and you can rename, move, pin or hide anything.
-- **The loop, fast.** Type a message and press ⌘↩ (*Commit All* when nothing is staged), then *Sync* or *Publish Branch* — the button always says what it will do. ⌘] jumps to the next repo that needs you.
-- **Everything you reach for.** Stage and unstage files, switch and create branches, stash, amend or undo an unpushed commit, and browse history as a graph.
+- **One list of what needs you.** Repos are grouped by what to do next — Needs a Fix, Changes, Ready to Push, Not Published — each row lined up with its branch and what it needs in its own colour ("3 changes", "2 to push"). Repos that only need a pull wait under Updates Available, long-untouched work under Dormant, and neither counts as needing you. Big change lists group by folder. Related repos are grouped into projects automatically — from your `.code-workspace` files, shared GitHub owners and folders — and you can rename, move, pin or hide anything.
+- **The loop, fast.** Type a message and press ⌘↩ (*Commit All* when nothing is staged), then *Push*, *Sync* or *Publish* — the button always says what it will do. ⌘] jumps to the next repo that needs you.
+- **Everything you reach for.** Stage and unstage files (or whole folders), switch and create branches, see worktrees under their repo, stash, amend or undo an unpushed commit, and browse history as a graph.
 - **Safe by design.** Ferry never force-pushes and never discards your changes. When git refuses a switch or pull because of local changes, it offers to stash and retry. Hook output and errors are explained in plain language with a way forward.
 - **AI commit messages (optional).** Bring your own OpenAI API key, press ✨, and a message streams in, written from exactly what you're about to commit. Files that look like secrets are never read or sent.
 - **Always current.** File changes show up in well under a second; remotes are fetched in the background every 3 minutes, paused offline and in Low Power Mode. Idle CPU stays at zero.
@@ -46,8 +46,9 @@ Out of scope on purpose: a diff viewer, discarding changes, and resolving merge 
 
    That's Apple's supported path for an app that isn't notarized. You only do it once. Details and a Terminal alternative: [docs/permissions.md](docs/permissions.md).
 
-3. **Choose the folders you keep code in.** Ferry suggests likely ones, scans them, shows repos as it finds them, and groups them into projects you can adjust.
-4. Optionally paste an OpenAI API key for ✨ messages — or skip it; everything else works without.
+3. **Choose the folders you keep code in.** Ferry suggests likely ones, scans them, shows repos as it finds them, and groups them into projects. Uncheck any repos you don't want to see — long-untouched ones start unchecked.
+4. If your GitHub repos use HTTPS and git can't sign in yet, Ferry offers to connect the GitHub CLI ([why](docs/install.md#signing-in-to-github)). Skip it if you use SSH keys.
+5. Optionally paste an OpenAI API key for ✨ messages — or skip it; everything else works without.
 
 Step-by-step with updating and uninstalling: [docs/install.md](docs/install.md).
 
@@ -103,7 +104,17 @@ The key is kept in your macOS Keychain, readable only while your Mac is unlocked
 
 **A commit fails because a hook can't find `node`, `npx` or another tool.** Ferry reads your login shell's environment once at launch (`$SHELL -il`), so hooks see the same `PATH` as Terminal. If a tool is only set up in an interactive-only file or a shell Ferry doesn't use, make it available in `~/.zprofile` (or `~/.zshrc`), then quit and reopen Ferry. The hook's full output is one click away in the error.
 
-**Push or fetch fails with an authentication error.** Ferry uses your credential helper and SSH agent but never answers SSH prompts itself. Use **Open in Terminal** (⌃⌘T) and run `git push` once to accept a host key or unlock your key, then try again in Ferry.
+**GitHub asks for a sign-in, or "N repos can't fetch from GitHub".** GitHub doesn't accept passwords for git; HTTPS remotes need a token. The simplest fix is the GitHub CLI:
+
+```bash
+brew install gh
+gh auth login        # once, in the browser
+gh auth setup-git    # git uses gh for github.com — in Terminal too
+```
+
+If `gh` is already signed in, **Connect GitHub CLI** (in the notice, **Settings → Git**, or the sign-in dialog) runs the last step for you. SSH remotes (`git@github.com:…`) with a key in your SSH agent work just as well. Ferry's background fetch never shows a sign-in dialog; it waits until git can sign in. More: [docs/install.md](docs/install.md#signing-in-to-github).
+
+**Push or fetch fails with an SSH error.** Ferry uses your SSH agent but never answers SSH prompts itself. Use **Open in Terminal** (⌃⌘T) and run `git push` once to accept a host key or unlock your key, then try again in Ferry.
 
 **A repo I expected is missing.** Check that its folder is under one of the folders in **Settings → Folders** (Ferry looks up to 6 levels deep and skips dependency and build folders), that you allowed folder access if macOS asked ([docs/permissions.md](docs/permissions.md#folder-access)), and that it isn't hidden (**Settings → Folders** lists hidden repos). **Add a Repository Directly…** adds any repo by hand.
 

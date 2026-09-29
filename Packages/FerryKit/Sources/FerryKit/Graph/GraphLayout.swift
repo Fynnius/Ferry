@@ -1,6 +1,10 @@
 /// Lane assignment for drawing a commit graph: process newest-first, the
 /// first parent continues the commit's own lane so a linear mainline stays straight,
 /// freed lanes are reused so the graph doesn't widen forever, colour is per lane.
+/// Commits must come children first; the order decides the width (see `GitRepository.log`
+/// for why that's date order). A parent beyond the loaded page keeps its lane open to the
+/// bottom, and the next page closes it: rows only depend on the commits before them, so
+/// laying out a longer list never changes the rows already shown.
 public struct GraphRow: Hashable, Sendable {
     public enum Anchor: Hashable, Sendable {
         /// Top edge of the row, in lane `n`.
@@ -90,7 +94,8 @@ public enum GraphLayout {
 }
 
 extension GraphRow.Anchor {
-    var lane: Int? {
+    /// The lane at the row's top or bottom edge; nil for the commit's dot.
+    public var lane: Int? {
         switch self {
         case .top(let n), .bottom(let n): n
         case .node: nil

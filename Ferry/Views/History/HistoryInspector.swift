@@ -10,49 +10,66 @@ struct HistoryInspector: View {
     @State private var loading = false
     @State private var canLoadMore = true
     @State private var error: String?
+    @State private var columnWidth: CGFloat = 340
 
     private static let pageSize = 150
 
+    /// Lanes the graph column may use: about 30 % of the column, never fewer than 4. The
+    /// rest always belongs to the commit subjects.
+    private var laneCap: Int {
+        max(4, Int(columnWidth * 0.3 / CommitRow.laneWidth))
+    }
+
     var body: some View {
         let repo = app.commandTarget
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("History").font(.headline)
-                    Text(repo?.name ?? "No repository").font(.subheadline).foregroundStyle(.secondary)
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                // As wide as the loaded history needs, up to the cap; one width for
+                // every row so subjects line up and don't shift while scrolling.
+                let lanes = min(rows.map(\.width).max() ?? 1, laneCap)
+                ForEach(rows, id: \.commit.id) { row in
+                    CommitRow(row: row, lanes: lanes)
                 }
-                Spacer()
-                Toggle("All Branches", isOn: $allBranches)
-                    .toggleStyle(.switch)
-                    .controlSize(.mini)
-                    .help("Show every branch, not just the current one and its upstream")
-            }
-            .padding(12)
-            Divider()
-            if let error {
-                Text(error).foregroundStyle(.secondary).padding(12)
-            }
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    let width = CGFloat(rows.map(\.width).max() ?? 1)
-                    ForEach(rows, id: \.commit.id) { row in
-                        CommitRow(row: row, graphWidth: width)
-                    }
-                    if canLoadMore && !rows.isEmpty {
-                        ProgressView()
-                            .controlSize(.small)
-                            .frame(maxWidth: .infinity)
-                            .padding(8)
-                            .onAppear { Task { await load(repo: repo, reset: false) } }
-                    }
-                }
-            }
-            .overlay {
-                if rows.isEmpty && !loading && error == nil {
-                    ContentUnavailableView("No commits yet", systemImage: "clock")
+                if canLoadMore && !rows.isEmpty {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(maxWidth: .infinity)
+                        .padding(8)
+                        .onAppear { Task { await load(repo: repo, reset: false) } }
                 }
             }
         }
+        // The header is a bar over the list rather than a block above a divider: commits
+        // scroll under it with the same soft edge as the stack.
+        .safeAreaBar(edge: .top) {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("History").font(.headline)
+                        Text(repo?.name ?? "No repository").font(.subheadline).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Toggle("All Branches", isOn: $allBranches)
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .help("Show every branch, not just the current one and its upstream")
+                }
+                .padding(12)
+                if let error {
+                    Text(error).foregroundStyle(.secondary).padding([.horizontal, .bottom], 12)
+                }
+            }
+        }
+        .scrollEdgeEffectStyle(.soft, for: .top)
+        .overlay {
+            if rows.isEmpty && !loading && error == nil {
+                ContentUnavailableView("No commits yet", systemImage: "clock")
+            }
+        }
+        // The graph is content, like the stack (RES-1: glass only on navigation chrome), so
+        // it sits on the stack's background: two surfaces in the window, not three.
+        .background(.background)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { columnWidth = $0 }
         .task(id: TaskKey(repoID: repo?.id, allBranches: allBranches, head: repo?.status?.branch.oid)) {
             await load(repo: repo, reset: true)
         }
@@ -87,7 +104,8 @@ struct HistoryInspector: View {
 
 struct CommitRow: View {
     var row: GraphRow
-    var graphWidth: CGFloat
+    /// Lanes the graph column shows; lanes past it fold into its right edge.
+    var lanes: Int
     @State private var hovering = false
 
     static let height: CGFloat = 28
@@ -96,8 +114,8 @@ struct CommitRow: View {
     var body: some View {
         HStack(spacing: 6) {
             // Full row height, so each row's lanes meet the next row's.
-            GraphCell(row: row)
-                .frame(width: graphWidth * Self.laneWidth + 8)
+            GraphCell(row: row, lanes: lanes)
+                .frame(width: CGFloat(lanes) * Self.laneWidth + 8)
                 .frame(maxHeight: .infinity)
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 4) {
@@ -152,16 +170,23 @@ struct RefChip: View {
     }
 }
 
-/// Draws one row's lane segments and the commit dot.
+/// Draws one row's lane segments and the commit dot. When the row has more lanes than the
+/// column shows, the last visible lane becomes a fold: lanes past it run down the edge as
+/// one dashed grey line, branches into and out of them curve to the edge in their own
+/// colour, and a commit in a folded lane sits on the edge.
 struct GraphCell: View {
     var row: GraphRow
+    var lanes: Int
 
     static let palette: [Color] = [.blue, .purple, .orange, .green, .pink, .teal, .indigo, .brown]
 
     var body: some View {
         Canvas { context, size in
             let lane = CommitRow.laneWidth
-            func x(_ n: Int) -> CGFloat { 8 + CGFloat(n) * lane }
+            let edge = lanes - 1
+            let folds = row.width > lanes
+            func isFolded(_ n: Int) -> Bool { folds && n >= edge }
+            func x(_ n: Int) -> CGFloat { 8 + CGFloat(min(n, edge)) * lane }
             let mid = size.height / 2
             func point(_ anchor: GraphRow.Anchor) -> CGPoint {
                 switch anchor {
@@ -170,11 +195,22 @@ struct GraphCell: View {
                 case .node: CGPoint(x: x(row.lane), y: mid)
                 }
             }
+            var drewFold = false
             for segment in row.segments {
                 let from = point(segment.from)
                 let to = point(segment.to)
                 var path = Path()
                 path.move(to: from)
+                if isFolded(segment.from.lane ?? row.lane) && isFolded(segment.to.lane ?? row.lane) {
+                    // Inside the fold: one dashed line for all of them.
+                    guard !drewFold else { continue }
+                    drewFold = true
+                    path = Path()
+                    path.move(to: CGPoint(x: x(edge), y: 0))
+                    path.addLine(to: CGPoint(x: x(edge), y: size.height))
+                    context.stroke(path, with: .color(.secondary), style: StrokeStyle(lineWidth: 1.6, dash: [2, 3]))
+                    continue
+                }
                 if from.x == to.x {
                     path.addLine(to: to)
                 } else {
